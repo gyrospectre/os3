@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "OS3: A sandbox SIEM environment"
+
+Parameters:
+  MyIPAddress:
+    Type: String
+    Description: This must be a valid IPv4 address.
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})
+    ConstraintDescription: Must be a valid IPv4 address of the form x.x.x.x.
+
+Resources:
+  KinesisBackupBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Delete
+
+  DeliveryRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        RoleName: !Sub '${AWS::StackName}-DeliveryRole'
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - 
+              Effect: Allow
+              Principal:
+                Service:
+                  - firehose.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Path: /
+        Policies:
+        - 
+          PolicyName: !Sub '${AWS::StackName}-DeliveryPolicy'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource:
+                  - !Sub ${KinesisBackupBucket.Arn}
+                  - !Sub ${KinesisBackupBucket.Arn}/*
+
+              - Effect: Allow
+                Action:
+                  - es:DescribeDomain
+                  - es:DescribeDomains
+                  - es:DescribeDomainConfig
+                  - es:ESHttpPost
+                  - es:ESHttpPut
+                Resource:
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}/*
+
+              - Effect: Allow
+                Action:
+                  - es:ESHttpGet
+                Resource:
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}/_all/_settings
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}/_cluster/stats
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}/_nodes
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}/_nodes/stats
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}/_nodes/*/stats
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}/_stats
+                  - !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${AWS::StackName}/index-name*/_stats
+
+  OpenSearchDomain:
+    Type: "AWS::OpenSearchService::Domain"
+    Properties:
+      DomainName: !Sub ${AWS::StackName}
+      EngineVersion: "OpenSearch_1.2"
+      ClusterConfig:
+        DedicatedMasterEnabled: false
+        InstanceCount: 1
+        InstanceType: "t3.small.search"
+        ZoneAwarenessEnabled: false
+      EncryptionAtRestOptions:
+        Enabled: false
+      LogPublishingOptions:
+        SEARCH_SLOW_LOGS:
+          Enabled: false
+        ES_APPLICATION_LOGS:
+          Enabled: false
+        INDEX_SLOW_LOGS:
+          Enabled: false
+        AUDIT_LOGS:
+          Enabled: false
+      NodeToNodeEncryptionOptions:
+        Enabled: false
+      EBSOptions:
+        EBSEnabled: true
+        VolumeSize: 10
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+        TLSSecurityPolicy: Policy-Min-TLS-1-2-2019-07
+      AccessPolicies:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: '*'
+            Action: es:ESHttp*
+            Resource: '*'
+            Condition:
+              IpAddress:
+                aws:SourceIp: !Ref MyIPAddress
+  
+  ElasticSearchDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+        ElasticsearchDestinationConfiguration: 
+          BufferingHints: 
+              IntervalInSeconds: 60
+              SizeInMBs: 50
+          CloudWatchLoggingOptions: 
+              Enabled: true
+              LogGroupName: "deliverystream"
+              LogStreamName: "opensearchDelivery"
+          DomainARN: !GetAtt OpenSearchDomain.Arn
+          IndexName: main
+          IndexRotationPeriod: "NoRotation"
+          RetryOptions: 
+              DurationInSeconds: "60"
+          RoleARN: !GetAtt DeliveryRole.Arn
+          S3BackupMode: FailedDocumentsOnly
+          S3Configuration: 
+              BucketARN: !GetAtt KinesisBackupBucket.Arn
+              BufferingHints: 
+                IntervalInSeconds: "60"
+                SizeInMBs: "50"
+              CompressionFormat: "UNCOMPRESSED"
+              Prefix: "firehose/"
+              RoleARN: !GetAtt DeliveryRole.Arn
+              CloudWatchLoggingOptions: 
+                Enabled: true
+                LogGroupName: "deliverystream"
+                LogStreamName: "s3Backup"         
